@@ -11,7 +11,7 @@
 // "ok", or with status "failed" and exit status 1; the verifier's error goes to stderr. get accepts
 // only a release pinned by tag and digest, sends one GET over the key-bound transport and prints
 // the body whatever the HTTP status, as uptime_check.sh expects; it exits 1 only when no verified
-// response arrived. The body is never echoed to stderr: /v2/host carries identifiers that the
+// response arrived. The body is never echoed to stderr: /host carries identifiers that the
 // public Actions log must not show.
 package main
 

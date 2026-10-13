@@ -36,7 +36,7 @@
 #      on, `state` is the host's own (runner/rust/src/supervisor/front.rs), so a family's refusal
 #      shows only in `families` and `refused_codes`. Printing `trust_list`, `host`, `families`, `refused_codes` and `isolation`
 #      (the kernel's confinement walls and the supervisor's capabilities, TDE-356) is safe.
-#   4. /v2/host has exactly `host_id` (lowercase UUID), `signing_public_key` and
+#   4. /host has exactly `host_id` (lowercase UUID), `signing_public_key` and
 #      `routing_public_key` (64 lowercase hex). The Tinfoil shim's not_found answer is accepted
 #      only while /health has no `families` (R1); no other route is checked then.
 #   5. The router attests as a Sigstore-verified release of tinfoilsh/confidential-model-router, the
@@ -48,7 +48,7 @@
 # ops/uptime_fixtures/ instead of the enclave. `r2-refused-family` must fail; `r1` and `r2` must
 # pass. Locally: `runner/ops/uptime_check.sh health runner/ops/uptime_fixtures/<fixture>.json`.
 #
-# This repository is public, so its Actions logs are public. /v2/host returns host,
+# This repository is public, so its Actions logs are public. /host returns host,
 # installation, enrollment and family identifiers: their bodies are checked for shape and never
 # printed. The workflow handles no secrets.
 
@@ -62,7 +62,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: Run the /health and /v2/host assertions against a fixture instead of the enclave
+        description: Run the /health and /host assertions against a fixture instead of the enclave
         type: choice
         default: 'off'
         options: ['off', 'r1', 'r2', 'r2-refused-family']
@@ -144,7 +144,7 @@ jobs:
       - name: Verified host document
         run: |
           spec="$(cat "$RUNNER_TEMP/uptime/runner-spec")"
-          "$ATTEST" get -enclave "$RUNNER_HOST" -repo "$spec" -path /v2/host > "$RUNNER_TEMP/uptime/host.json"
+          "$ATTEST" get -enclave "$RUNNER_HOST" -repo "$spec" -path /host > "$RUNNER_TEMP/uptime/host.json"
           ops/uptime_check.sh host "$RUNNER_TEMP/uptime/host.json" "$RUNNER_TEMP/uptime/health.json" --route-out "$RUNNER_TEMP/uptime/route"
           rm -f "$RUNNER_TEMP/uptime/host.json"
 

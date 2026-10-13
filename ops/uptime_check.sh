@@ -13,9 +13,9 @@
 #
 # LIST is the signed approved-releases envelope; DOC is the document `list` verified out of it.
 # ATTESTATION is `attest verify` output (native/runner-client/cmd/attest). HEALTH, HOST and IDENTITY
-# are the bodies `attest get` printed for /health, /v2/host and the pairing identity document.
+# are the bodies `attest get` printed for /health, /host and the pairing identity document.
 #
-# The destination repository's Actions logs are public: /v2/host and the identity document carry host,
+# The destination repository's Actions logs are public: /host and the identity document carry host,
 # installation, enrollment and family identifiers and are checked for shape, never printed.
 set -euo pipefail
 
@@ -287,9 +287,9 @@ cmd_host() {
   # the body whatever the status.
   if jq -e '.error.code == "not_found"' "$host" >/dev/null 2>&1; then
     if jq -e 'has("families")' "$health" >/dev/null 2>&1; then
-      die "/health is R2's but /v2/host answered not_found"
+      die "/health is R2's but /host answered not_found"
     fi
-    echo "/v2/host is not served (R1)."
+    echo "/host is not served (R1)."
     echo absent >"$route_out"
     return
   fi
@@ -299,8 +299,8 @@ cmd_host() {
               and test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))
          and ([.signing_public_key, .routing_public_key]
               | all(type == "string" and test("^[0-9a-f]{64}$")))' "$host" >/dev/null 2>&1 \
-    || die "/v2/host does not have exactly host_id, signing_public_key and routing_public_key in lowercase"
-  echo "/v2/host has the expected shape."
+    || die "/host does not have exactly host_id, signing_public_key and routing_public_key in lowercase"
+  echo "/host has the expected shape."
   echo present >"$route_out"
 }
 
