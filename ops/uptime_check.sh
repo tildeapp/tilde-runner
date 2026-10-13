@@ -188,17 +188,23 @@ cmd_release() {
   echo "$RUNNER_REPO@$tag@sha256:$attested" >"$spec_out"
 }
 
+# The runner's router rule (runner/rust/src/trust_list.rs): the attestation proves the release is
+# Tinfoil's Sigstore-attested build of ROUTER_REPO, and the signed list must name ROUTER_REPO and
+# not revoke its digest. `router.approved` is reported, never required.
 cmd_router() {
   local doc="${1:-}" record="${2:-}"
   [ -n "$doc" ] && [ -n "$record" ] || usage router
   attested_digest "$record" "Router" "$ROUTER_REPO"
+  [ "$(jq -r '.router.repo' "$doc")" = "$ROUTER_REPO" ] \
+    || die "The signed approved-releases list names router repo $(jq -r '.router.repo' "$doc"), not $ROUTER_REPO. Hosted inference fails closed."
   if jq -e --arg d "$attested" '.router.revoked | index($d)' "$doc" >/dev/null; then
     die "Router release sha256:$attested is revoked by the signed approved-releases list. Hosted inference fails closed."
   fi
-  if ! jq -e --arg d "$attested" '.router.approved | index($d)' "$doc" >/dev/null; then
-    die "Router release drifted: attested $attested, the signed list approves $(jq -r '.router.approved | join(",")' "$doc"). Hosted inference fails closed until a list approving it is published."
+  if jq -e --arg d "$attested" '.router.approved | index($d)' "$doc" >/dev/null; then
+    echo "Router release sha256:$attested is not revoked (and is listed in router.approved)."
+  else
+    echo "Router release sha256:$attested is not revoked (not listed in router.approved, which runners before the provenance rule require)."
   fi
-  echo "Router digest is approved by the signed list."
 }
 
 cmd_health() {

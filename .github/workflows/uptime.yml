@@ -14,7 +14,8 @@
 #                              check also remembers the last version it verified (an Actions cache
 #                              entry), so this only matters after that entry is evicted or to raise
 #                              the floor by hand.
-# No release tag, release digest or router digest is configured here: the signed list decides.
+# No release tag, release digest or router digest is configured here: the signed list decides the
+# runner release, and Tinfoil's attestation plus the list's revocations decide the router.
 #
 # Assertions, in order:
 #   1. https://tildeapp.ai/approved-releases.json verifies under the compiled approval key (or a
@@ -34,9 +35,10 @@
 #   4. /v2/host has exactly `host_id` (lowercase UUID), `signing_public_key` and
 #      `routing_public_key` (64 lowercase hex). The Tinfoil shim's not_found answer is accepted
 #      only while /health has no `families` (R1); no other route is checked then.
-#   5. The router's attested digest is in the list's `router.approved` and not in `router.revoked`:
-#      exactly the set the runner accepts (runner/rust/src/trust_list.rs). A Tinfoil router
-#      rollover is approved by publishing a list, not by a runner release.
+#   5. The router attests as a Sigstore-verified release of tinfoilsh/confidential-model-router, the
+#      list's router.repo names that repository and its `router.revoked` does not hold the digest:
+#      exactly the rule the runner applies (runner/rust/src/trust_list.rs). A Tinfoil router
+#      rollover needs no new list; `router.approved` is reported but not required.
 #
 # Dry run: `workflow_dispatch` with `dry_run` set to a fixture runs assertions 3 and 4 against
 # ops/uptime_fixtures/ instead of the enclave. `r2-refused-family` must fail; `r1` and `r2` must
@@ -149,7 +151,7 @@ jobs:
           ops/uptime_check.sh host "$RUNNER_TEMP/uptime/host.json" "$RUNNER_TEMP/uptime/health.json" --route-out "$RUNNER_TEMP/uptime/route"
           rm -f "$RUNNER_TEMP/uptime/host.json"
 
-      - name: Inference router release is in the signed list
+      - name: Inference router release is not revoked by the signed list
         run: |
           tinfoil attestation verify -e "$ROUTER_HOST" -r "$ROUTER_REPO" -j > "$RUNNER_TEMP/uptime/router.json" || true
           ops/uptime_check.sh router "$RUNNER_TEMP/uptime/approved.json" "$RUNNER_TEMP/uptime/router.json"

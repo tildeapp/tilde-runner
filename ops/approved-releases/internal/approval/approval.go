@@ -1,5 +1,8 @@
 // Package approval verifies Tilde's signed approved-releases list (TDE-344): the runner releases
-// the app may connect to and the inference router digests the runner may use.
+// the app may connect to. The router section is parsed and validated here but applied only by the
+// runner, which accepts the inference router release Tinfoil's SDK proves unless router.revoked
+// lists it; router.approved no longer gates a current runner (runner/rust/README.md, Inference
+// router trust).
 //
 // The list is a JSON document wrapped in a signed envelope:
 //
@@ -105,21 +108,6 @@ func (v *Verified) Approves(digest string) bool {
 func (v *Verified) Revokes(digest string) bool {
 	for _, revoked := range v.Document.Revoked {
 		if revoked == digest {
-			return true
-		}
-	}
-	return false
-}
-
-// RouterApproves applies the same rule to the inference router's digests.
-func (v *Verified) RouterApproves(digest string) bool {
-	for _, revoked := range v.Document.Router.Revoked {
-		if revoked == digest {
-			return false
-		}
-	}
-	for _, approved := range v.Document.Router.Approved {
-		if approved == digest {
 			return true
 		}
 	}
