@@ -12,6 +12,8 @@ networks:
       - inference.tinfoil.sh
       - github-proxy.tinfoil.sh
       - kds-proxy.tinfoil.sh
+      # TDE-419: the host emails invite links itself, so the link secret never reaches the backend.
+      - api.resend.com
 
 # The persistent disk ("Tilde Runner Disk", attached to the `disk` mount) is encrypted inside the
 # enclave with a secret this keyserver releases to approved releases only; the enclave never
@@ -40,6 +42,7 @@ containers:
       - TILDE_RUNNER_CONFIG
       - TILDE_RUNNER_UNLOCK
       - TINFOIL_API_KEY
+      - RESEND_API_KEY
     tmpfs:
       /state: "size=128m,mode=0700,uid=10001,gid=10001"
     volumes:
@@ -56,10 +59,11 @@ shim:
   upstream-port: 8937
   paths:
     - /health
-    - /v2/host
-    - /v2/identity
-    - /v2/activate
-    - /v2/commands
-    - /v2/progress-stream
-    - /v2/guard
-    - /v2/recovery
+    - /host
+    - /identity
+    - /activate
+    - /commands
+    - /progress-stream
+    - /guard
+    - /recovery
+    - /join
