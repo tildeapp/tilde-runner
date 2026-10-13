@@ -12,8 +12,8 @@
 #   uptime_check.sh approval-key
 #
 # LIST is the signed approved-releases envelope; DOC is the document `list` verified out of it.
-# ATTESTATION is `tinfoil attestation verify -j` output. HEALTH, HOST and IDENTITY are the bodies
-# `tinfoil http get` printed for /health, /v2/host and the pairing identity document.
+# ATTESTATION is `attest verify` output (native/runner-client/cmd/attest). HEALTH, HOST and IDENTITY
+# are the bodies `attest get` printed for /health, /v2/host and the pairing identity document.
 #
 # The destination repository's Actions logs are public: /v2/host and the identity document carry host,
 # installation, enrollment and family identifiers and are checked for shape, never printed.
@@ -283,8 +283,8 @@ cmd_host() {
   local host="${1:-}" health="${2:-}" route_out=""
   [ "${3:-}" = "--route-out" ] && route_out="${4:-}"
   [ -n "$host" ] && [ -n "$health" ] && [ -n "$route_out" ] || usage host
-  # The Tinfoil shim answers an unrouted path 404 with this OpenAI-style body; `tinfoil http get`
-  # prints the body only, not the status.
+  # The Tinfoil shim answers an unrouted path 404 with this OpenAI-style body; `attest get` prints
+  # the body whatever the status.
   if jq -e '.error.code == "not_found"' "$host" >/dev/null 2>&1; then
     if jq -e 'has("families")' "$health" >/dev/null 2>&1; then
       die "/health is R2's but /v2/host answered not_found"
