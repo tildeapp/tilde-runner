@@ -71,8 +71,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  TINFOIL_CLI_VERSION: '0.19.0'
-  TINFOIL_CLI_SHA256: 'ef014c67a976b4b47941d084fb0a3837ba6eb59c9f4e662424c6826fb7a70f8c'
+  TINFOIL_CLI_VERSION: '0.19.2'
+  TINFOIL_CLI_SHA256: 'be1b69a23adcda7be80644db039dce347afc0f56349397a5fdecad720a21bbba'
   APPROVED_LIST_URL: https://tildeapp.ai/approved-releases.json
   RUNNER_REPO: tildeapp/tilde-runner
   ROUTER_HOST: inference.tinfoil.sh
