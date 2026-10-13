@@ -215,8 +215,15 @@ cmd_health() {
   jq -c '{service, state, enrolled, version, store, volume_error, trust_list, host, families, refused_codes, isolation}
          | with_entries(select(.value != null))' "$health"
 
-  jq -e '.service == "tilde-runner" and .state == "ready" and .enrolled == true' "$health" >/dev/null \
-    || error "Runner is attested but not ready and enrolled (state: $(jq -r '.state' "$health"))"
+  # `enrolled` is the pinned family's (supervisor/front.rs, health_body). A hosted runner (R2, with
+  # `families`) admits families on its own, so only a single runner (R1) must be enrolled.
+  if jq -e 'has("families")' "$health" >/dev/null; then
+    jq -e '.service == "tilde-runner" and .state == "ready"' "$health" >/dev/null \
+      || error "Hosted runner is attested but not ready (state: $(jq -r '.state' "$health"))"
+  else
+    jq -e '.service == "tilde-runner" and .state == "ready" and .enrolled == true' "$health" >/dev/null \
+      || error "Runner is attested but not ready and enrolled (state: $(jq -r '.state' "$health"))"
+  fi
   jq -e '.store == "volume" and (has("volume_error") | not)' "$health" >/dev/null \
     || error "Runner state is not on the encrypted volume (store: $(jq -r '.store' "$health"), volume_error: $(jq -r '.volume_error // "none"' "$health"))"
 

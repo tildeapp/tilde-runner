@@ -24,13 +24,14 @@
 #      old (a warning from 6 days) and not in the future.
 #   2. The runner's attested release digest (any release of tildeapp/tilde-runner) is in the list's
 #      `approved` and not in `revoked`. Every request below is pinned to that tag and digest.
-#   3. /health: service tilde-runner, `state` ready, `enrolled` true, `store` volume, no
+#   3. /health: service tilde-runner, `state` ready, `enrolled` true (R1 only: it reports the pinned
+#      family, which a hosted runner need not have), `store` volume, no
 #      `volume_error` (custody check 24); `trust_list.status` current, or stale under 7 days (a
 #      warning); `missing`, an absent `trust_list` or `age_seconds` of 7 days or more fail.
 #      When `families` is present (R2, `tilde-runner hosted`): `families.unreadable`,
-#      `families.refused` and `families.breaker_open` are 0 and `host` is registered. `state` stays
-#      the pinned family's alone, so another family's refusal shows only in `families` and
-#      `refused_codes`. Printing `trust_list`, `host`, `families`, `refused_codes` and `isolation`
+#      `families.refused` and `families.breaker_open` are 0 and `host` is registered. With admission
+#      on, `state` is the host's own (runner/rust/src/supervisor/front.rs), so a family's refusal
+#      shows only in `families` and `refused_codes`. Printing `trust_list`, `host`, `families`, `refused_codes` and `isolation`
 #      (the kernel's confinement walls and the supervisor's capabilities, TDE-356) is safe.
 #   4. /v2/host has exactly `host_id` (lowercase UUID), `signing_public_key` and
 #      `routing_public_key` (64 lowercase hex). The Tinfoil shim's not_found answer is accepted
