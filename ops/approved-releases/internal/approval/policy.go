@@ -26,7 +26,8 @@ const (
 )
 
 var (
-	// ErrUnavailable: no verified list, neither fetched nor cached. Nothing is approved.
+	// ErrUnavailable: no verified list, neither fetched nor cached, so nothing is approved; or,
+	// from CheckFresh, a fetch for a release the list does not name did not finish in time.
 	ErrUnavailable = errors.New("approval list unavailable")
 	// ErrRevoked: the verified release is on the list's revoked set.
 	ErrRevoked = errors.New("release revoked")
@@ -94,11 +95,39 @@ func (p *Policy) SetCacheDir(dir string) {
 // Refresh starts from the cached copy, fetches when the list is due, and reports ErrUnavailable
 // only when no verified list exists afterwards. A failed or refused fetch keeps the current list.
 func (p *Policy) Refresh(ctx context.Context) error {
+	return p.refresh(ctx, false)
+}
+
+// CheckFresh is Check, except that a release the current list does not name sends one fetch ahead
+// of RefreshInterval (still at most one attempt per RetryInterval) and is checked again, so a
+// release approved by a newly published list is admitted at once instead of after the interval.
+func (p *Policy) CheckFresh(ctx context.Context, digest string) error {
+	err := p.Check(digest)
+	if !errors.Is(err, ErrNotApproved) {
+		return err
+	}
+	cut := p.refresh(ctx, true)
+	err = p.Check(digest)
+	if errors.Is(err, ErrNotApproved) && cut != nil {
+		// The fetch did not finish in time, so the release is unconfirmed rather than refused.
+		return ErrUnavailable
+	}
+	return err
+}
+
+// errCut: an early refresh's fetch, or its wait for one in flight, ended with its context.
+var errCut = errors.New("approval list fetch did not finish")
+
+// refresh fetches when the list is due, or with early regardless of RefreshInterval; early also
+// waits for a fetch already in flight, so its caller sees that fetch's list, and reports errCut
+// when that fetch or wait ended with a context. A fetch that was skipped or completed is not cut.
+func (p *Policy) refresh(ctx context.Context, early bool) error {
 	p.mu.Lock()
 	p.loadCache()
 	now := p.now()
-	due := p.current == nil || now.Sub(p.lastSuccess) >= RefreshInterval
+	due := early || p.current == nil || now.Sub(p.lastSuccess) >= RefreshInterval
 	retry := p.lastAttempt.IsZero() || now.Sub(p.lastAttempt) >= RetryInterval
+	cut := false
 	if due && retry && p.inflight == nil && p.source != nil {
 		done := make(chan struct{})
 		p.inflight, p.lastAttempt = done, now
@@ -108,16 +137,20 @@ func (p *Policy) Refresh(ctx context.Context) error {
 		if err == nil && p.accept(raw) == nil {
 			p.lastSuccess = p.now()
 		}
+		cut = errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
 		p.inflight = nil
 		close(done)
 	}
 	waiting := p.inflight
 	available := p.current != nil || p.fallback != ""
 	p.mu.Unlock()
-	if !available && waiting != nil {
+	if (early || !available) && waiting != nil {
 		select {
 		case <-waiting:
 		case <-ctx.Done():
+			if early {
+				return errCut
+			}
 			return ErrUnavailable
 		}
 		p.mu.Lock()
@@ -126,6 +159,9 @@ func (p *Policy) Refresh(ctx context.Context) error {
 	}
 	if !available {
 		return ErrUnavailable
+	}
+	if early && cut {
+		return errCut
 	}
 	return nil
 }
