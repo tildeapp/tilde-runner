@@ -2,7 +2,7 @@ module com.tilde/runner-client
 
 go 1.27.2
 
-require github.com/tinfoilsh/tinfoil-go v0.17.0-rc.1.0.20261009012920-31c57af7d7b4
+require github.com/tinfoilsh/tinfoil-go v0.17.0-rc.2
 
 require (
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
