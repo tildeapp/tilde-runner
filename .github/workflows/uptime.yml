@@ -8,8 +8,12 @@
 # moves with every SDK update the app takes. Every assertion lives in uptime_check.sh; its cases
 # are runner/ops/uptime_check_test.sh and native/runner-client/cmd/attest.
 #
-# every 15 minutes attested check of the hosted runner and of the inference router it trusts. A failure fails
-# the job, and GitHub notifies the workflow's owner by email; no third-party service is involved.
+# An attested check of the hosted runner and of the inference router it trusts, every 15 minutes: Supabase's
+# pg_cron calls the `uptime-dispatch` Edge Function, which dispatches this workflow (TDE-390); the schedule below
+# is only a fallback, since GitHub runs it every few hours. A failure fails the job and posts to Slack
+# (#production-alerts, tagging Casey), and Grafana tags him when GitHub stops accepting dispatches.
+#
+# Repository secret: SLACK_PRODUCTION_ALERTS_WEBHOOK, the Slack incoming webhook for #production-alerts.
 #
 # Repository variables (Settings > Secrets and variables > Actions > Variables):
 #   RUNNER_HOST                enclave hostname, e.g. tilde-runner-m1.tilde.containers.tinfoil.dev
@@ -152,6 +156,18 @@ jobs:
         run: |
           "$ATTEST" verify -enclave "$ROUTER_HOST" -repo "$ROUTER_REPO" > "$RUNNER_TEMP/uptime/router.json" || true
           ops/uptime_check.sh router "$RUNNER_TEMP/uptime/approved.json" "$RUNNER_TEMP/uptime/router.json"
+
+      - name: Post the failure to Slack
+        if: failure()
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_PRODUCTION_ALERTS_WEBHOOK }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [ -n "$SLACK_WEBHOOK" ] || { echo '::warning::SLACK_PRODUCTION_ALERTS_WEBHOOK is not set'; exit 0; }
+          jq -n --arg run "$RUN_URL" '{text: "<@U0C6LJ7SA14>", attachments: [{color: "#E01E5A",
+              title: "Attested uptime check failed",
+              text: "The check that verifies the hosted runner the way the app does has failed. <\($run)|Run log>"}]}' \
+            | curl -sS --fail -X POST -H 'Content-Type: application/json' --data @- "$SLACK_WEBHOOK" > /dev/null
 
   dry-run:
     if: (inputs.dry_run || 'off') != 'off'
