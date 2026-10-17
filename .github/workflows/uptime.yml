@@ -11,9 +11,13 @@
 # An attested check of the hosted runner and of the inference router it trusts, every 15 minutes: Supabase's
 # pg_cron calls the `uptime-dispatch` Edge Function, which dispatches this workflow (TDE-390); the schedule below
 # is only a fallback, since GitHub runs it every few hours. A failure fails the job and posts to Slack
-# (#production-alerts, tagging Casey), and Grafana tags him when GitHub stops accepting dispatches.
+# (#production-alerts, tagging Casey), and Grafana tags him when GitHub stops accepting dispatches. The first
+# failure after a passing run also starts the alert triage routine through the `alert-triage` Edge Function, as
+# Grafana's alerts do; later failures in the same streak post to Slack only. Only an assertion failing starts triage,
+# and a failed send is retried by the next failing check.
 #
-# Repository secret: SLACK_PRODUCTION_ALERTS_WEBHOOK, the Slack incoming webhook for #production-alerts.
+# Repository secrets: SLACK_PRODUCTION_ALERTS_WEBHOOK, the Slack incoming webhook for #production-alerts, and
+# ALERT_TRIAGE_SECRET, the bearer `alert-triage` accepts (1Password "Tildebot Alert Triage Relay Secret").
 #
 # Repository variables (Settings > Secrets and variables > Actions > Variables):
 #   RUNNER_HOST                enclave hostname, e.g. tilde-runner-m1.tilde.containers.tinfoil.dev
@@ -54,7 +58,7 @@
 #
 # This repository is public, so its Actions logs are public. /host returns host,
 # installation, enrollment and family identifiers: their bodies are checked for shape and never
-# printed. The workflow handles no secrets.
+# printed. Its secrets are only ever sent as the Slack webhook URL and the triage bearer.
 
 name: Uptime
 
@@ -73,6 +77,8 @@ on:
 
 permissions:
   contents: read
+  # The triage step reads the previous run's conclusion.
+  actions: read
 
 concurrency:
   group: uptime
@@ -123,6 +129,7 @@ jobs:
           restore-keys: approved-list-floor-
 
       - name: Signed approved-releases list
+        id: list
         run: |
           curl -fsS --proto '=https' --retry 3 --max-time 30 -o "$RUNNER_TEMP/uptime/list.json" "$APPROVED_LIST_URL" \
             || { echo '::error::Could not fetch the approved-releases list'; exit 1; }
@@ -136,16 +143,19 @@ jobs:
           key: approved-list-floor-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Live runner release is approved
+        id: release
         run: |
           "$ATTEST" verify -enclave "$RUNNER_HOST" -repo "$RUNNER_REPO" > "$RUNNER_TEMP/uptime/runner.json" || true
           ops/uptime_check.sh release "$RUNNER_TEMP/uptime/approved.json" "$RUNNER_TEMP/uptime/runner.json" --spec-out "$RUNNER_TEMP/uptime/runner-spec"
 
       - name: Verified runner health
+        id: health
         run: |
           "$ATTEST" get -enclave "$RUNNER_HOST" -repo "$(cat "$RUNNER_TEMP/uptime/runner-spec")" -path /health > "$RUNNER_TEMP/uptime/health.json"
           ops/uptime_check.sh health "$RUNNER_TEMP/uptime/health.json"
 
       - name: Verified host document
+        id: host
         run: |
           spec="$(cat "$RUNNER_TEMP/uptime/runner-spec")"
           "$ATTEST" get -enclave "$RUNNER_HOST" -repo "$spec" -path /host > "$RUNNER_TEMP/uptime/host.json"
@@ -153,6 +163,7 @@ jobs:
           rm -f "$RUNNER_TEMP/uptime/host.json"
 
       - name: Inference router release is not revoked by the signed list
+        id: router
         run: |
           "$ATTEST" verify -enclave "$ROUTER_HOST" -repo "$ROUTER_REPO" > "$RUNNER_TEMP/uptime/router.json" || true
           ops/uptime_check.sh router "$RUNNER_TEMP/uptime/approved.json" "$RUNNER_TEMP/uptime/router.json"
@@ -168,6 +179,57 @@ jobs:
               title: "Attested uptime check failed",
               text: "The check that verifies the hosted runner the way the app does has failed. <\($run)|Run log>"}]}' \
             | curl -sS --fail -X POST -H 'Content-Type: application/json' --data @- "$SLACK_WEBHOOK" > /dev/null
+
+      # Only an assertion's own failure is an incident to triage; a GitHub step failing (checkout, cache, the build)
+      # still posts to Slack above but starts nothing.
+      - name: Start the alert triage routine for the first failure in a row
+        if: >-
+          failure() && (steps.list.outcome == 'failure' || steps.release.outcome == 'failure'
+          || steps.health.outcome == 'failure' || steps.host.outcome == 'failure' || steps.router.outcome == 'failure')
+        env:
+          ALERT_TRIAGE_SECRET: ${{ secrets.ALERT_TRIAGE_SECRET }}
+          ALERT_TRIAGE_URL: https://vikrckqkpxfltoodrpui.supabase.co/functions/v1/alert-triage
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STEP: Start the alert triage routine for the first failure in a row
+          # The Jobs API names a job by its display name, which for this job (no `name:`) is its id.
+          JOB: attested-uptime
+        run: |
+          [ -n "$ALERT_TRIAGE_SECRET" ] || { echo '::warning::ALERT_TRIAGE_SECRET is not set'; exit 0; }
+          # The incident was already sent if the latest earlier production check (a run where this job ran; dry runs skip
+          # it) failed and this step succeeded there, by sending or by finding it sent. A cancelled or timed-out
+          # check decides nothing, so the walk goes past it; a failed send is retried.
+          sent=false
+          decided=false
+          for page in 1 2 3 4 5; do
+            runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/uptime.yml/runs?status=completed&branch=main&per_page=50&page=$page" \
+              --jq '.workflow_runs[].id')"
+            [ -n "$runs" ] || break
+            for run in $runs; do
+              [ "$run" = "$GITHUB_RUN_ID" ] && continue
+              job="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/jobs" | jq -c --arg job "$JOB" '.jobs[] | select(.name == $job)')"
+              [ -n "$job" ] || continue
+              case "$(jq -r '.conclusion // ""' <<<"$job")" in
+                success) decided=true ;;
+                failure)
+                  decided=true
+                  [ "$(jq -r --arg step "$STEP" '(.steps // [])[] | select(.name == $step) | .conclusion' <<<"$job")" = success ] \
+                    && sent=true ;;
+              esac
+              [ "$decided" = true ] && break 2
+            done
+          done
+          if [ "$sent" = true ]; then
+            echo 'The previous check failed too and this incident was already sent to triage.'
+            exit 0
+          fi
+          jq -n --arg run "$RUN_URL" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{alerts: [{status: "firing",
+              labels: {alertname: "Attested uptime check failed", notify: "page"},
+              annotations: {summary: "Attested uptime check failed",
+                description: "The GitHub Actions check in tildeapp/tilde-runner that verifies the hosted runner the way the app does failed. Its Slack message is titled \"Attested uptime check failed\". Run log: \($run)"},
+              startsAt: $at}]}' \
+            | curl -sS --fail -X POST -H "Authorization: Bearer $ALERT_TRIAGE_SECRET" -H 'Content-Type: application/json' \
+              --data @- "$ALERT_TRIAGE_URL" > /dev/null
 
   dry-run:
     if: (inputs.dry_run || 'off') != 'off'
