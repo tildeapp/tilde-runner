@@ -22,7 +22,6 @@ const (
 	// MaxAge marks a list stale. A stale list is still used: staleness warns, it does not refuse.
 	MaxAge       = 7 * 24 * time.Hour
 	FetchTimeout = 10 * time.Second
-	cacheName    = "approved-releases.v1"
 )
 
 var (
@@ -50,8 +49,9 @@ const (
 	StatusStale
 )
 
-// Policy holds the newest verified list and decides which releases are approved.
+// Policy holds the newest verified list in one scheme and decides which releases are approved.
 type Policy struct {
+	scheme   Scheme
 	anchor   ed25519.PublicKey
 	source   Source
 	fallback string
@@ -67,13 +67,19 @@ type Policy struct {
 	inflight    chan struct{}
 }
 
-// NewPolicy trusts anchor (the compiled approval key). fallback is a digest approved only while
-// no verified list exists; it is empty in every release build.
+// NewPolicy is a v1 policy.
 func NewPolicy(anchor ed25519.PublicKey, source Source, fallback string, now func() time.Time) *Policy {
+	return V1.NewPolicy(anchor, source, fallback, now)
+}
+
+// NewPolicy trusts anchor (the compiled approval key) and accepts only lists in this scheme, cached
+// under the scheme's own file name. fallback is a digest approved only while no verified list
+// exists; it is empty in every release build.
+func (s Scheme) NewPolicy(anchor ed25519.PublicKey, source Source, fallback string, now func() time.Time) *Policy {
 	if now == nil {
 		now = time.Now
 	}
-	return &Policy{anchor: anchor, source: source, fallback: fallback, now: now}
+	return &Policy{scheme: s, anchor: anchor, source: source, fallback: fallback, now: now}
 }
 
 // SetCacheDir sets where the newest verified bytes persist. Without one the list lives in memory.
@@ -191,6 +197,18 @@ func (p *Policy) Check(digest string) error {
 	}
 }
 
+// Minimum is the oldest app build digest's release serves under the current verified list. A
+// release approved only by the fallback, or a list without minimums (v1), names none.
+func (p *Policy) Minimum(digest string) (AppMinimum, bool) {
+	p.mu.Lock()
+	current := p.current
+	p.mu.Unlock()
+	if current == nil {
+		return AppMinimum{}, false
+	}
+	return current.Minimum(digest)
+}
+
 // Status reports whether a verified list exists and whether it is older than MaxAge.
 func (p *Policy) Status() (Status, *Verified) {
 	p.mu.Lock()
@@ -213,7 +231,7 @@ func (p *Policy) Accept(raw []byte) error {
 }
 
 func (p *Policy) accept(raw []byte) error {
-	verified, err := Verify(raw, p.anchor)
+	verified, err := p.scheme.Verify(raw, p.anchor)
 	if err != nil {
 		return err
 	}
@@ -243,7 +261,7 @@ func (p *Policy) loadCache() {
 	if p.cacheDir == "" {
 		return
 	}
-	raw, err := os.ReadFile(filepath.Join(p.cacheDir, cacheName))
+	raw, err := os.ReadFile(filepath.Join(p.cacheDir, p.scheme.cacheName()))
 	if err != nil {
 		return
 	}
@@ -255,7 +273,7 @@ func (p *Policy) writeCache(raw []byte) {
 	if p.cacheDir == "" || os.MkdirAll(p.cacheDir, 0o700) != nil {
 		return
 	}
-	temporary, err := os.CreateTemp(p.cacheDir, cacheName+".*")
+	temporary, err := os.CreateTemp(p.cacheDir, p.scheme.cacheName()+".*")
 	if err != nil {
 		return
 	}
@@ -264,7 +282,7 @@ func (p *Policy) writeCache(raw []byte) {
 		temporary.Close()
 		return
 	}
-	_ = os.Rename(temporary.Name(), filepath.Join(p.cacheDir, cacheName))
+	_ = os.Rename(temporary.Name(), filepath.Join(p.cacheDir, p.scheme.cacheName()))
 }
 
 // HTTPSource fetches url over HTTPS without redirects, bounded in size.
