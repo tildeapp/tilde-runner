@@ -127,19 +127,26 @@ jobs:
           # cache is kept, below, where `go mod verify` and go.sum check every file.
           cache: false
 
-      # Go's default module cache on the hosted runner (GOPATH is unset), keyed on go.sum.
+      # Go's default module cache on the hosted runner (GOPATH is unset), keyed on go.sum. Cache entries can't be
+      # overwritten, so each save gets its own key and a restore takes the newest entry for this go.sum: a cache
+      # rebuilt after failing `go mod verify` replaces the bad one. The cache only saves time, so a cache service
+      # error never stops the check.
       - name: Restore the attestation client's modules
         id: modules_cache
+        continue-on-error: true
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/go/pkg/mod
-          key: go-modules-${{ runner.os }}-${{ hashFiles('ops/approved-releases/go.sum') }}
+          key: go-modules-${{ runner.os }}-${{ hashFiles('ops/approved-releases/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: go-modules-${{ runner.os }}-${{ hashFiles('ops/approved-releases/go.sum') }}-
 
       # proxy.golang.org sometimes drops a download mid-stream. Each attempt fetches only what is still missing, and
       # `|` (unlike `,`, which falls back only on a 404 or 410) falls back to the module's own source on any proxy
-      # error. Whatever the source, every module must match go.sum.
+      # error. Whatever the source, every module must match go.sum. The step's own limit stops a stalled proxy while
+      # the job still has time to report it as "couldn't run"; the job's limit would cancel the run with no alert.
       - name: Download the attestation client's modules
         id: modules
+        timeout-minutes: 5
         env:
           GOPROXY: https://proxy.golang.org|direct
         run: |
@@ -160,15 +167,17 @@ jobs:
             go clean -modcache
             download
             go -C ops/approved-releases mod verify
+            echo 'rebuilt=true' >> "$GITHUB_OUTPUT"
           fi
 
       - name: Save the attestation client's modules
         id: modules_save
-        if: steps.modules_cache.outputs.cache-hit != 'true'
+        if: steps.modules_cache.outputs.cache-matched-key == '' || steps.modules.outputs.rebuilt == 'true'
+        continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/go/pkg/mod
-          key: ${{ steps.modules_cache.outputs.cache-primary-key }}
+          key: go-modules-${{ runner.os }}-${{ hashFiles('ops/approved-releases/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       # go.sum pins every module, the Tinfoil SDK included, to the app's exact versions. Both commands build from the
       # modules downloaded above, with no network, so no assertion below downloads or compiles Go code.
@@ -240,18 +249,21 @@ jobs:
           "$ATTEST" verify -enclave "$ROUTER_HOST" -repo "$ROUTER_REPO" > "$RUNNER_TEMP/uptime/router.json" || true
           ops/uptime_check.sh router "$RUNNER_TEMP/uptime/approved.json" "$RUNNER_TEMP/uptime/router.json"
 
-      # A failed step skips every later one, so at most one step has failed. The assertions are the steps the
-      # triage step below names; any other step failing means the check couldn't run.
+      # A failed step skips every later one, so at most one step has failed; a cache step allowed to fail keeps its
+      # failed outcome but concludes as a success. This step decides whether the failure was an assertion's, and
+      # the triage step below reads that answer; any other step failing means the check couldn't run.
       - name: Post the failure to Slack
+        id: slack
         if: failure()
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_PRODUCTION_ALERTS_WEBHOOK }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           STEPS: ${{ toJSON(steps) }}
         run: |
-          failed="$(jq -r '[to_entries[] | select(.value.outcome == "failure") | .key] | first // ""' <<<"$STEPS")"
+          failed="$(jq -r '[to_entries[] | select(.value.conclusion == "failure") | .key] | first // ""' <<<"$STEPS")"
           case "$failed" in
             list | list_v2 | release | health | host | router)
+              echo 'assertion=true' >> "$GITHUB_OUTPUT"
               title='Attested uptime check failed'
               color='#E01E5A'
               text='The check that verifies the hosted runner the way the app does has failed.'
@@ -284,10 +296,7 @@ jobs:
       # Only an assertion's own failure is an incident to triage. Any other step failing (checkout, a cache, the
       # client's download or build) posts "couldn't run" to Slack above but starts nothing.
       - name: Start the alert triage routine for the first failure in a row
-        if: >-
-          failure() && (steps.list.outcome == 'failure' || steps.list_v2.outcome == 'failure'
-          || steps.release.outcome == 'failure' || steps.health.outcome == 'failure' || steps.host.outcome == 'failure'
-          || steps.router.outcome == 'failure')
+        if: failure() && steps.slack.outputs.assertion == 'true'
         env:
           ALERT_TRIAGE_SECRET: ${{ secrets.ALERT_TRIAGE_SECRET }}
           ALERT_TRIAGE_URL: https://vikrckqkpxfltoodrpui.supabase.co/functions/v1/alert-triage
