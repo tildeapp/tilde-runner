@@ -121,6 +121,20 @@ func (p *Policy) CheckFresh(ctx context.Context, digest string) error {
 	return err
 }
 
+// CatchUp fetches ahead of RefreshInterval, still at most once per RetryInterval, when the current
+// list's version is below version: another party reports deciding under that version, so a newer
+// list may be published. The fetched list is accepted under the usual rules; the reported version
+// only prompts the fetch.
+func (p *Policy) CatchUp(ctx context.Context, version uint64) {
+	p.mu.Lock()
+	p.loadCache()
+	behind := p.current == nil || p.current.Document.Version < version
+	p.mu.Unlock()
+	if behind {
+		_ = p.refresh(ctx, true)
+	}
+}
+
 // errCut: an early refresh's fetch, or its wait for one in flight, ended with its context.
 var errCut = errors.New("approval list fetch did not finish")
 
