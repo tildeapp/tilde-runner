@@ -100,7 +100,7 @@ jobs:
   attested-uptime:
     if: (inputs.dry_run || 'off') == 'off'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 16
     env:
       RUNNER_HOST: ${{ vars.RUNNER_HOST }}
       APPROVED_LIST_MIN_VERSION: ${{ vars.APPROVED_LIST_MIN_VERSION }}
@@ -142,21 +142,23 @@ jobs:
 
       # proxy.golang.org sometimes drops a download mid-stream. Each attempt fetches only what is still missing, and
       # `|` (unlike `,`, which falls back only on a 404 or 410) falls back to the module's own source on any proxy
-      # error. Whatever the source, every module must match go.sum. The step's own limit stops a stalled proxy while
-      # the job still has time to report it as "couldn't run"; the job's limit would cancel the run with no alert.
+      # error. Whatever the source, every module must match go.sum. Three attempts take at most 5 minutes, and a
+      # rebuild after a failed verify runs them again. The step's own limit is only a backstop for a wedged process:
+      # it fails the step while the job still has time to report it as "couldn't run", where the job's limit would
+      # cancel the run with no alert.
       - name: Download the attestation client's modules
         id: modules
-        timeout-minutes: 5
+        timeout-minutes: 11
         env:
           GOPROXY: https://proxy.golang.org|direct
         run: |
           download() {
             local attempt
             for attempt in 1 2 3; do
-              timeout 120 go -C ops/approved-releases mod download && return 0
+              timeout 90 go -C ops/approved-releases mod download && return 0
               [ "$attempt" -lt 3 ] || break
               echo "::warning::Downloading the attestation client's Go modules failed (attempt $attempt of 3); retrying"
-              sleep $((attempt * 15))
+              sleep $((attempt * 10))
             done
             echo "::error title=Attested uptime check couldn't run::The attestation client's Go modules did not download in 3 attempts; the runner was not checked"
             return 1
@@ -172,7 +174,7 @@ jobs:
 
       - name: Save the attestation client's modules
         id: modules_save
-        if: steps.modules_cache.outputs.cache-matched-key == '' || steps.modules.outputs.rebuilt == 'true'
+        if: success() && (steps.modules_cache.outputs.cache-matched-key == '' || steps.modules.outputs.rebuilt == 'true')
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
