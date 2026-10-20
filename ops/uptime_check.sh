@@ -4,6 +4,7 @@
 # run and in uptime_check_test.sh. Annotations go to stdout as GitHub workflow commands.
 #
 #   uptime_check.sh list LIST --out DOC [--floor-file F] [--min-version N] [--pub KEY] [--now EPOCH]
+#   uptime_check.sh list-v2 LIST_V2 --v1-doc DOC --out DOC_V2 [--pub KEY]
 #   uptime_check.sh release DOC ATTESTATION --spec-out FILE
 #   uptime_check.sh router DOC ATTESTATION
 #   uptime_check.sh health HEALTH [--pre-r1]
@@ -11,7 +12,8 @@
 #   uptime_check.sh identity IDENTITY
 #   uptime_check.sh approval-key
 #
-# LIST is the signed approved-releases envelope; DOC is the document `list` verified out of it.
+# LIST is the signed approved-releases envelope; DOC is the document `list` verified out of it. LIST_V2
+# is the format v2 list that app builds reading v2 fetch instead; DOC_V2 is its verified document.
 # ATTESTATION is `attest verify` output (native/runner-client/cmd/attest). HEALTH, HOST and IDENTITY
 # are the bodies `attest get` printed for /health, /host and the pairing identity document.
 #
@@ -157,6 +159,61 @@ cmd_list() {
     echo "$version" >"$floor_file"
   fi
   echo "The approved-releases list verifies, is current and did not go backwards."
+}
+
+# The v2 list is signed from the same document as v1, adding each release's minimum app version
+# (runner/keyserver/README.md, Format v2), so it must verify and, minimums aside, equal the v1
+# document `list` just checked: same version, issued_at, releases, revocations and router. A
+# mismatch means only one of the two files was published, and app builds that read v2 see a
+# different set of releases than older builds and the runner's mirror. `list` already holds the
+# shared version to its floor and age.
+cmd_list_v2() {
+  local list="" v1_doc="" out="" pub=""
+  list="${1:-}"
+  shift || true
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --v1-doc) v1_doc="${2:-}" ;;
+      --out) out="${2:-}" ;;
+      --pub) pub="${2:-}" ;;
+      *) usage list-v2 ;;
+    esac
+    shift
+    shift || true
+  done
+  [ -n "$list" ] && [ -n "$v1_doc" ] && [ -n "$out" ] || usage list-v2
+  [ -s "$list" ] || die "The v2 approved-releases list is missing or empty"
+  [ -s "$v1_doc" ] || die "No verified v1 document to compare the v2 list with"
+  list="$(cd "$(dirname "$list")" && pwd)/$(basename "$list")"
+  [ -n "$pub" ] || pub="$(approval_key)"
+  [ -n "$pub" ] || die "ApprovalPublicKey is not set in native/runner-client/internal/transport/transport.go; no list can verify"
+
+  local format
+  format="$(jq -r '.format // "none"' "$list" 2>/dev/null || echo unreadable)"
+  [ "$format" = "tilde.approved-releases.v2" ] \
+    || die "The v2 approved-releases list's format is $format, expected tilde.approved-releases.v2"
+  local detail
+  if ! verifier verify -pub "$pub" -in "$list" >"$out" 2>"$out.err"; then
+    detail="$(head -n 1 "$out.err")"
+    rm -f "$out" "$out.err"
+    die "The v2 approved-releases list does not verify under the compiled approval key: ${detail:-no detail}"
+  fi
+  rm -f "$out.err"
+  echo "Approved-releases list v2: version $(jq -r '.version' "$out"), newest release $(jq -r '.approved[-1] | "\(.tag) with minimum app \(.minimum_app | tojson)"' "$out")"
+
+  # The envelope's format picks the signing context, so a v1 signature never verifies as v2; a release
+  # without a minimum is refused here as well, whatever the envelope says.
+  if ! jq -e '.approved | length > 0' "$out" >/dev/null; then
+    error "The v2 list approves no releases"
+  elif ! jq -e '.approved | all(.minimum_app | type == "object")' "$out" >/dev/null; then
+    error "The v2 list has an approved release without a minimum_app"
+  fi
+  local shared='{version, issued_at, revoked, router, approved: [.approved[] | {tag, digest}]}'
+  if ! jq -e --slurpfile v1 "$v1_doc" "($shared) == (\$v1[0] | $shared)" "$out" >/dev/null; then
+    error "The v2 list (version $(jq -r '.version' "$out")) does not match the v1 list (version $(jq -r '.version' "$v1_doc")) in version, issued_at, releases, revocations or router: the two were not published together"
+  fi
+  finish
+  echo "The v2 approved-releases list verifies and matches the v1 list."
 }
 
 # Prints the record's safe fields and leaves the attested digest in $attested.
@@ -319,6 +376,7 @@ command="${1:-}"
 shift || true
 case "$command" in
   list) cmd_list "$@" ;;
+  list-v2) cmd_list_v2 "$@" ;;
   release) cmd_release "$@" ;;
   router) cmd_router "$@" ;;
   health) cmd_health "$@" ;;
@@ -329,5 +387,5 @@ case "$command" in
     [ -n "$key" ] || die "ApprovalPublicKey is not set"
     echo "$key"
     ;;
-  *) die "usage: uptime_check.sh list|release|router|health|host|identity|approval-key …" ;;
+  *) die "usage: uptime_check.sh list|list-v2|release|router|health|host|identity|approval-key …" ;;
 esac

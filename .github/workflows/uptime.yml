@@ -11,10 +11,13 @@
 # An attested check of the hosted runner and of the inference router it trusts, every 15 minutes: Supabase's
 # pg_cron calls the `uptime-dispatch` Edge Function, which dispatches this workflow (TDE-390); the schedule below
 # is only a fallback, since GitHub runs it every few hours. A failure fails the job and posts to Slack
-# (#production-alerts, tagging Casey), and Grafana tags him when GitHub stops accepting dispatches. The first
-# failure after a passing run also starts the alert triage routine through the `alert-triage` Edge Function, as
-# Grafana's alerts do; later failures in the same streak post to Slack only. Only an assertion failing starts triage,
-# and a failed send is retried by the next failing check.
+# (#production-alerts, tagging Casey), and Grafana tags him when GitHub stops accepting dispatches. An assertion
+# failing is posted as "Attested uptime check failed". Any other step failing, such as downloading or building the
+# attestation client, is posted as "Attested uptime check couldn't run" with the step's name: the runner went
+# unchecked, which says nothing about its state. Both fail the run and tag Casey every time, so a check that keeps
+# failing to run is never quiet. The first assertion failure after a passing run also starts the alert triage routine
+# through the `alert-triage` Edge Function, as Grafana's alerts do; later failures in the same streak post to Slack
+# only, and a failed send is retried by the next failing check.
 #
 # Repository secrets: SLACK_PRODUCTION_ALERTS_WEBHOOK, the Slack incoming webhook for #production-alerts, and
 # ALERT_TRIAGE_SECRET, the bearer `alert-triage` accepts (1Password "Tildebot Alert Triage Relay Secret").
@@ -32,7 +35,9 @@
 #   1. https://tildeapp.ai/approved-releases.json verifies under the compiled approval key (or a
 #      successor it endorsed); router.repo is tinfoilsh/confidential-model-router; its version is
 #      not below the last verified version or APPROVED_LIST_MIN_VERSION; issued_at is under 7 days
-#      old (a warning from 6 days) and not in the future.
+#      old (a warning from 6 days) and not in the future. https://tildeapp.ai/approved-releases.v2.json,
+#      the same list in format v2 with each release's minimum app version, which newer app builds read,
+#      verifies and matches it once the minimums are set aside.
 #   2. The runner's attested release digest (any release of tildeapp/tilde-runner) is in the list's
 #      `approved` and not in `revoked`. Every request below is pinned to that tag and digest.
 #   3. /health: service tilde-runner, `state` ready, `enrolled` true (R1 only: it reports the pinned
@@ -86,6 +91,7 @@ concurrency:
 
 env:
   APPROVED_LIST_URL: https://tildeapp.ai/approved-releases.json
+  APPROVED_LIST_V2_URL: https://tildeapp.ai/approved-releases.v2.json
   RUNNER_REPO: tildeapp/tilde-runner
   ROUTER_HOST: inference.tinfoil.sh
   ROUTER_REPO: tinfoilsh/confidential-model-router
@@ -94,34 +100,102 @@ jobs:
   attested-uptime:
     if: (inputs.dry_run || 'off') == 'off'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 16
     env:
       RUNNER_HOST: ${{ vars.RUNNER_HOST }}
       APPROVED_LIST_MIN_VERSION: ${{ vars.APPROVED_LIST_MIN_VERSION }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
         with:
           persist-credentials: false
 
       - name: Require configuration
+        id: config
         run: |
           [[ "$RUNNER_HOST" =~ ^[a-z0-9.-]+$ ]] || { echo '::error::RUNNER_HOST is missing or invalid'; exit 1; }
           [[ "$APPROVED_LIST_MIN_VERSION" =~ ^[0-9]*$ ]] || { echo '::error::APPROVED_LIST_MIN_VERSION must be a whole number'; exit 1; }
           mkdir -p "$RUNNER_TEMP/uptime"
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - name: Install Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: setup_go
         with:
           go-version-file: ops/approved-releases/go.mod
+          # setup-go's cache would also restore compiled packages, which nothing re-verifies; only the module
+          # cache is kept, below, where `go mod verify` and go.sum check every file.
           cache: false
 
-      # go.sum pins every module, the Tinfoil SDK included, to the app's exact versions.
+      # Go's default module cache on the hosted runner (GOPATH is unset), keyed on go.sum. Cache entries can't be
+      # overwritten, so each save gets its own key and a restore takes the newest entry for this go.sum: a cache
+      # rebuilt after failing `go mod verify` replaces the bad one. The cache only saves time, so a cache service
+      # error never stops the check.
+      - name: Restore the attestation client's modules
+        id: modules_cache
+        continue-on-error: true
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: go-modules-${{ runner.os }}-${{ hashFiles('ops/approved-releases/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: go-modules-${{ runner.os }}-${{ hashFiles('ops/approved-releases/go.sum') }}-
+
+      # proxy.golang.org sometimes drops a download mid-stream. Each attempt fetches only what is still missing, and
+      # `|` (unlike `,`, which falls back only on a 404 or 410) falls back to the module's own source on any proxy
+      # error. Whatever the source, every module must match go.sum. Three attempts take at most 5 minutes, and a
+      # rebuild after a failed verify runs them again. The step's own limit is only a backstop for a wedged process:
+      # it fails the step while the job still has time to report it as "couldn't run", where the job's limit would
+      # cancel the run with no alert.
+      - name: Download the attestation client's modules
+        id: modules
+        timeout-minutes: 11
+        env:
+          GOPROXY: https://proxy.golang.org|direct
+        run: |
+          download() {
+            local attempt
+            for attempt in 1 2 3; do
+              timeout 90 go -C ops/approved-releases mod download && return 0
+              [ "$attempt" -lt 3 ] || break
+              echo "::warning::Downloading the attestation client's Go modules failed (attempt $attempt of 3); retrying"
+              sleep $((attempt * 10))
+            done
+            echo "::error title=Attested uptime check couldn't run::The attestation client's Go modules did not download in 3 attempts; the runner was not checked"
+            return 1
+          }
+          download
+          if ! go -C ops/approved-releases mod verify; then
+            echo '::warning::The restored module cache changed after it was downloaded; downloading every module again'
+            go clean -modcache
+            download
+            go -C ops/approved-releases mod verify
+            echo 'rebuilt=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Save the attestation client's modules
+        id: modules_save
+        if: success() && (steps.modules_cache.outputs.cache-matched-key == '' || steps.modules.outputs.rebuilt == 'true')
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: go-modules-${{ runner.os }}-${{ hashFiles('ops/approved-releases/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # go.sum pins every module, the Tinfoil SDK included, to the app's exact versions. Both commands build from the
+      # modules downloaded above, with no network, so no assertion below downloads or compiles Go code.
       - name: Build the app's attestation client
+        id: build
+        env:
+          GOPROXY: 'off'
         run: |
           go -C ops/approved-releases build -trimpath -o "$RUNNER_TEMP/bin/attest" ./cmd/attest
+          go -C ops/approved-releases build -trimpath -o "$RUNNER_TEMP/bin/approved-releases" ./cmd/approved-releases
           echo "ATTEST=$RUNNER_TEMP/bin/attest" >> "$GITHUB_ENV"
+          echo "APPROVED_RELEASES_BIN=$RUNNER_TEMP/bin/approved-releases" >> "$GITHUB_ENV"
 
       # The newest cache entry holds the last list version a run verified; each run saves its own.
       - name: Restore the last verified list version
+        id: floor_restore
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/approved-list-floor
@@ -136,7 +210,16 @@ jobs:
           ops/uptime_check.sh list "$RUNNER_TEMP/uptime/list.json" --out "$RUNNER_TEMP/uptime/approved.json" \
             --floor-file "$RUNNER_TEMP/approved-list-floor/version" --min-version "$APPROVED_LIST_MIN_VERSION"
 
+      - name: Signed approved-releases list (v2)
+        id: list_v2
+        run: |
+          curl -fsS --proto '=https' --retry 3 --max-time 30 -o "$RUNNER_TEMP/uptime/list.v2.json" "$APPROVED_LIST_V2_URL" \
+            || { echo '::error::Could not fetch the v2 approved-releases list'; exit 1; }
+          ops/uptime_check.sh list-v2 "$RUNNER_TEMP/uptime/list.v2.json" --v1-doc "$RUNNER_TEMP/uptime/approved.json" \
+            --out "$RUNNER_TEMP/uptime/approved.v2.json"
+
       - name: Remember the verified list version
+        id: floor_save
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/approved-list-floor
@@ -168,24 +251,54 @@ jobs:
           "$ATTEST" verify -enclave "$ROUTER_HOST" -repo "$ROUTER_REPO" > "$RUNNER_TEMP/uptime/router.json" || true
           ops/uptime_check.sh router "$RUNNER_TEMP/uptime/approved.json" "$RUNNER_TEMP/uptime/router.json"
 
+      # A failed step skips every later one, so at most one step has failed; a cache step allowed to fail keeps its
+      # failed outcome but concludes as a success. This step decides whether the failure was an assertion's, and
+      # the triage step below reads that answer; any other step failing means the check couldn't run.
       - name: Post the failure to Slack
+        id: slack
         if: failure()
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_PRODUCTION_ALERTS_WEBHOOK }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STEPS: ${{ toJSON(steps) }}
         run: |
+          failed="$(jq -r '[to_entries[] | select(.value.conclusion == "failure") | .key] | first // ""' <<<"$STEPS")"
+          case "$failed" in
+            list | list_v2 | release | health | host | router)
+              echo 'assertion=true' >> "$GITHUB_OUTPUT"
+              title='Attested uptime check failed'
+              color='#E01E5A'
+              text='The check that verifies the hosted runner the way the app does has failed.'
+              ;;
+            *)
+              case "$failed" in
+                checkout) step='Check out the repository' ;;
+                config) step='Require configuration' ;;
+                setup_go) step='Install Go' ;;
+                modules_cache) step="Restore the attestation client's modules" ;;
+                modules) step="Download the attestation client's modules" ;;
+                modules_save) step="Save the attestation client's modules" ;;
+                build) step="Build the app's attestation client" ;;
+                floor_restore) step='Restore the last verified list version' ;;
+                floor_save) step='Remember the verified list version' ;;
+                *) step='a step before the assertions' ;;
+              esac
+              title="Attested uptime check couldn't run"
+              color='#ECB22E'
+              text="The check stopped at \"$step\" before any assertion failed, so the hosted runner went unchecked; this says nothing about its state. It stays unchecked until a run passes."
+              echo "::error title=$title::Stopped at \"$step\"; no assertion failed and the runner was not checked"
+              ;;
+          esac
+          echo "### $title" >> "$GITHUB_STEP_SUMMARY"
           [ -n "$SLACK_WEBHOOK" ] || { echo '::warning::SLACK_PRODUCTION_ALERTS_WEBHOOK is not set'; exit 0; }
-          jq -n --arg run "$RUN_URL" '{text: "<@U0C6LJ7SA14>", attachments: [{color: "#E01E5A",
-              title: "Attested uptime check failed",
-              text: "The check that verifies the hosted runner the way the app does has failed. <\($run)|Run log>"}]}' \
+          jq -n --arg run "$RUN_URL" --arg title "$title" --arg color "$color" --arg text "$text" \
+            '{text: "<@U0C6LJ7SA14>", attachments: [{color: $color, title: $title, text: "\($text) <\($run)|Run log>"}]}' \
             | curl -sS --fail -X POST -H 'Content-Type: application/json' --data @- "$SLACK_WEBHOOK" > /dev/null
 
-      # Only an assertion's own failure is an incident to triage; a GitHub step failing (checkout, cache, the build)
-      # still posts to Slack above but starts nothing.
+      # Only an assertion's own failure is an incident to triage. Any other step failing (checkout, a cache, the
+      # client's download or build) posts "couldn't run" to Slack above but starts nothing.
       - name: Start the alert triage routine for the first failure in a row
-        if: >-
-          failure() && (steps.list.outcome == 'failure' || steps.release.outcome == 'failure'
-          || steps.health.outcome == 'failure' || steps.host.outcome == 'failure' || steps.router.outcome == 'failure')
+        if: failure() && steps.slack.outputs.assertion == 'true'
         env:
           ALERT_TRIAGE_SECRET: ${{ secrets.ALERT_TRIAGE_SECRET }}
           ALERT_TRIAGE_URL: https://vikrckqkpxfltoodrpui.supabase.co/functions/v1/alert-triage
