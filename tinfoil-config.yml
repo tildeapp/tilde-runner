@@ -28,7 +28,7 @@ volumes:
 
 containers:
   - name: tilde-runner
-    image: ghcr.io/tildeapp/tilde-runner@sha256:7cea5ab088fbf57ddc7b6c5322d0db494b2ad8e421128b30c4af68b724859133
+    image: ghcr.io/tildeapp/tilde-runner@sha256:0c0bb803e7c7f0de2792464298e584008d2169c49926d3ba99728aa2d4f6ca09
     command: [hosted]
     user: "10001:10001"
     read_only: true
