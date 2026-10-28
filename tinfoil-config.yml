@@ -18,7 +18,9 @@ networks:
 # The persistent disk ("Tilde Runner Disk", attached to the `disk` mount) is encrypted inside the
 # enclave with a secret this keyserver releases to approved releases only; the enclave never
 # generates or stores it. The runner keeps its sealed state file on it (TDE-320), anchored in
-# the Supabase state record so a rolled-back disk is refused.
+# the Supabase state record so a rolled-back disk is refused. Since TDE-514 the runner also
+# generates its host root inside the enclave on first boot and keeps it only here; every runner
+# key derives from that root, and nothing the keyserver releases determines one.
 volumes:
   - name: disk
     key-secret: TILDE_RUNNER_DISK_KEY
@@ -28,7 +30,7 @@ volumes:
 
 containers:
   - name: tilde-runner
-    image: ghcr.io/tildeapp/tilde-runner@sha256:ba1d1380ae2f33a3cb55734d331f8e6558b9242b44e13d8c7bf8c52509fedf34
+    image: ghcr.io/tildeapp/tilde-runner@sha256:8e3eae5b610c8ff1e7e25c23c06b41f9fc29ccd1f4ab7699410242293730d97d
     command: [hosted]
     user: "10001:10001"
     read_only: true
@@ -40,7 +42,6 @@ containers:
       - TILDE_RUNNER_ADMIT_FAMILIES: "1"
     secrets:
       - TILDE_RUNNER_CONFIG
-      - TILDE_RUNNER_UNLOCK
       - TINFOIL_API_KEY
       - RESEND_API_KEY
     tmpfs:
