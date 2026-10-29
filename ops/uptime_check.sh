@@ -272,8 +272,9 @@ cmd_health() {
   jq -c '{service, state, enrolled, version, store, volume_error, trust_list, host, families, refused_codes, isolation}
          | with_entries(select(.value != null))' "$health"
 
-  # `enrolled` is the pinned family's (supervisor/front.rs, health_body). A hosted runner (R2, with
-  # `families`) admits families on its own, so only a single runner (R1) must be enrolled.
+  # `enrolled` is a single runner's (R1). A hosted runner (with `families`) has no one enrollment and
+  # leaves it out (supervisor/front.rs, health_body); releases before TDE-546 still report the
+  # pinned family's there, which is not checked.
   if jq -e 'has("families")' "$health" >/dev/null; then
     jq -e '.service == "tilde-runner" and .state == "ready"' "$health" >/dev/null \
       || error "Hosted runner is attested but not ready (state: $(jq -r '.state' "$health"))"
