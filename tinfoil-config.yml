@@ -30,16 +30,13 @@ volumes:
 
 containers:
   - name: tilde-runner
-    image: ghcr.io/tildeapp/tilde-runner@sha256:de4d24a03c1fc9cbc8fa8099a9ac582ef10fdb38b8cb62ff394dc357c18ee7c6
+    image: ghcr.io/tildeapp/tilde-runner@sha256:3a5d7f9a7a3f8a9403c7e3ace0f77c2496e198fcab356bb71b4874b5615cfa47
     command: [hosted]
     user: "10001:10001"
     read_only: true
     networks: [backend]
     env:
       - TILDE_RUNNER_STATE: "/state/runner"
-      # Rollout switch (M4 design §11): "0" serves exactly the pinned household through one worker
-      # and admits no other family (R2); "1" also serves every family the host registry lists (R3).
-      - TILDE_RUNNER_ADMIT_FAMILIES: "1"
     secrets:
       - TILDE_RUNNER_CONFIG
       - TINFOIL_API_KEY
