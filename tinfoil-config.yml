@@ -30,7 +30,7 @@ volumes:
 
 containers:
   - name: tilde-runner
-    image: ghcr.io/tildeapp/tilde-runner@sha256:13a61ed74a1ac94e807b2425b77d3c686ebcb70cf1944bc793e3e71b826e899f
+    image: ghcr.io/tildeapp/tilde-runner@sha256:5a6c308f33759dd1a0868092cbfa577c2af50dd4f7727965615397baaf85fec5
     command: [hosted]
     user: "10001:10001"
     read_only: true
@@ -65,3 +65,12 @@ shim:
     - /guard
     - /recovery
     - /join
+    # Outside agents (TDE-576, TDE-577): the MCP endpoint and its OAuth linking.
+    - /mcp
+    - /.well-known/oauth-authorization-server
+    - /.well-known/oauth-protected-resource/mcp
+    - /oauth/register
+    - /oauth/authorize
+    - /oauth/authorize/status
+    - /oauth/authorize/continue
+    - /oauth/token
