@@ -65,6 +65,9 @@ shim:
     - /guard
     - /recovery
     - /join
+    # TDE-617: the app warms the family's worker before the first message. The runner has served
+    # this since m1.44; without the path here the proxy answered it 404 and nothing was warmed.
+    - /warm
     # Outside agents (TDE-576, TDE-577): the MCP endpoint and its OAuth linking.
     - /mcp
     - /.well-known/oauth-authorization-server
