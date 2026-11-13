@@ -351,13 +351,15 @@ cmd_host() {
     echo absent >"$route_out"
     return
   fi
+  # A field a newer runner adds is ignored, as the app's client ignores it; the three it reads are
+  # each required and checked.
   jq -e 'type == "object"
-         and (keys == ["host_id", "routing_public_key", "signing_public_key"])
+         and has("host_id") and has("routing_public_key") and has("signing_public_key")
          and (.host_id | type == "string"
               and test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))
          and ([.signing_public_key, .routing_public_key]
               | all(type == "string" and test("^[0-9a-f]{64}$")))' "$host" >/dev/null 2>&1 \
-    || die "/host does not have exactly host_id, signing_public_key and routing_public_key in lowercase"
+    || die "/host does not have host_id, signing_public_key and routing_public_key in lowercase"
   echo "/host has the expected shape."
   echo present >"$route_out"
 }
