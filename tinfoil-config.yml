@@ -14,6 +14,9 @@ networks:
       - kds-proxy.tinfoil.sh
       # TDE-419: the host emails invite links itself, so the link secret never reaches the backend.
       - api.resend.com
+      # TDE-703: Composio hands a connector's file back as a presigned link to its storage; the runner
+      # reads the file itself so the link never reaches the model.
+      - temp.4d4f16c61d89ec64e760039c4ec50717.r2.cloudflarestorage.com
 
 # The persistent disk ("Tilde Runner Disk", attached to the `disk` mount) is encrypted inside the
 # enclave with a secret this keyserver releases to approved releases only; the enclave never
@@ -30,7 +33,7 @@ volumes:
 
 containers:
   - name: tilde-runner
-    image: ghcr.io/tildeapp/tilde-runner@sha256:d60986d06fb38a3a00cb20b2dd3c172118e81adc1eab7ae8fee32a9e0d890545
+    image: ghcr.io/tildeapp/tilde-runner@sha256:fbbb34188d0197312ceca89ee524cb8876a7dd30a96ce2a2705f296ad09ed217
     command: [hosted]
     user: "10001:10001"
     read_only: true
