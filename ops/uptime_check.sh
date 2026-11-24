@@ -3,7 +3,7 @@
 # the workflow already fetched, so the same assertions run against fixtures in the workflow's dry
 # run and in uptime_check_test.sh. Annotations go to stdout as GitHub workflow commands.
 #
-#   uptime_check.sh list LIST --out DOC [--floor-file F] [--min-version N] [--pub KEY] [--now EPOCH]
+#   uptime_check.sh list LIST --out DOC [--floor-file F] [--min-version N] [--pub KEY]
 #   uptime_check.sh list-v2 LIST_V2 --v1-doc DOC --out DOC_V2 [--pub KEY]
 #   uptime_check.sh release DOC ATTESTATION --spec-out FILE
 #   uptime_check.sh router DOC ATTESTATION
@@ -23,13 +23,6 @@ set -euo pipefail
 
 readonly RUNNER_REPO="tildeapp/tilde-runner"
 readonly ROUTER_REPO="tinfoilsh/confidential-model-router"
-# The runner reports a list `stale` past seven days (runner/rust/src/trust_list.rs STALE_AFTER) and
-# keeps using it; this check is what turns an unrefreshed list into a page (design §8.2).
-readonly MAX_AGE_SECONDS=604800
-readonly WARN_AGE_SECONDS=518400
-# Tolerated clock skew before an issued_at in the future is refused: a future-dated list would
-# otherwise never age past the staleness limit.
-readonly FUTURE_SKEW_SECONDS=3600
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 failures=0
@@ -79,19 +72,8 @@ verifier() {
   fi
 }
 
-# RFC 3339 to epoch seconds; jq's fromdateiso8601 accepts only whole seconds in UTC.
-readonly JQ_EPOCH='
-  def rfc3339_epoch:
-    capture("^(?<d>[0-9]{4}-[0-9]{2}-[0-9]{2})[Tt](?<t>[0-9]{2}:[0-9]{2}:[0-9]{2})(\\.[0-9]+)?(?<z>[Zz]|(?<s>[+-])(?<h>[0-9]{2}):(?<m>[0-9]{2}))$")
-    | ((.d + "T" + .t + "Z") | fromdateiso8601)
-      - (if .s == null then 0
-         else (if .s == "+" then 1 else -1 end) * ((.h | tonumber) * 3600 + (.m | tonumber) * 60)
-         end);'
-
-days() { echo "$(($1 / 86400))d $((($1 % 86400) / 3600))h"; }
-
 cmd_list() {
-  local list="" out="" floor_file="" min_version="" pub="" now=""
+  local list="" out="" floor_file="" min_version="" pub=""
   list="${1:-}"
   shift || true
   while [ $# -gt 0 ]; do
@@ -100,7 +82,6 @@ cmd_list() {
       --floor-file) floor_file="${2:-}" ;;
       --min-version) min_version="${2:-}" ;;
       --pub) pub="${2:-}" ;;
-      --now) now="${2:-}" ;;
       *) usage list ;;
     esac
     shift
@@ -112,7 +93,6 @@ cmd_list() {
   list="$(cd "$(dirname "$list")" && pwd)/$(basename "$list")"
   [ -n "$pub" ] || pub="$(approval_key)"
   [ -n "$pub" ] || die "ApprovalPublicKey is not set in native/runner-client/internal/transport/transport.go; no list can verify"
-  [ -n "$now" ] || now="$(date -u +%s)"
 
   local detail
   if ! verifier verify -pub "$pub" -in "$list" >"$out" 2>"$out.err"; then
@@ -122,11 +102,9 @@ cmd_list() {
   fi
   rm -f "$out.err"
 
-  local version issued_at issued
+  local version issued_at
   version="$(jq -r '.version' "$out")"
   issued_at="$(jq -r '.issued_at' "$out")"
-  issued="$(jq -r "$JQ_EPOCH"' .issued_at | rfc3339_epoch' "$out" 2>/dev/null)" \
-    || die "The approved-releases list's issued_at ($issued_at) is not RFC 3339"
   echo "Approved-releases list: version $version, issued_at $issued_at, $(jq -r '"\(.approved | length) approved, \(.revoked | length) revoked, router \(.router.approved | length) approved, \(.router.revoked | length) revoked"' "$out")"
 
   [ "$(jq -r '.router.repo' "$out")" = "$ROUTER_REPO" ] \
@@ -144,21 +122,12 @@ cmd_list() {
     error "The approved-releases list went backwards: version $version is below $floor (last seen ${seen:-none}, APPROVED_LIST_MIN_VERSION ${min_version:-unset}). A served older list can restore revoked releases."
   fi
 
-  local age=$((now - issued))
-  if [ "$age" -lt "-$FUTURE_SKEW_SECONDS" ]; then
-    error "The approved-releases list's issued_at ($issued_at) is in the future"
-  elif [ "$age" -ge "$MAX_AGE_SECONDS" ]; then
-    error "The approved-releases list is $(days "$age") old (issued_at $issued_at); re-sign and publish a new version (fails past 7 days)"
-  elif [ "$age" -ge "$WARN_AGE_SECONDS" ]; then
-    warn "The approved-releases list is $(days "$age") old; this check fails at 7 days"
-  fi
-
   finish
   if [ -n "$floor_file" ]; then
     mkdir -p "$(dirname "$floor_file")"
     echo "$version" >"$floor_file"
   fi
-  echo "The approved-releases list verifies, is current and did not go backwards."
+  echo "The approved-releases list verifies and did not go backwards."
 }
 
 # The v2 list is signed from the same document as v1, adding each release's minimum app version
@@ -166,7 +135,7 @@ cmd_list() {
 # document `list` just checked: same version, issued_at, releases, revocations and router. A
 # mismatch means only one of the two files was published, and app builds that read v2 see a
 # different set of releases than older builds and the runner's mirror. `list` already holds the
-# shared version to its floor and age.
+# shared version to its floor.
 cmd_list_v2() {
   local list="" v1_doc="" out="" pub=""
   list="${1:-}"
@@ -292,24 +261,13 @@ cmd_health() {
       error "/health has no trust_list: the runner predates R1 and checks no signed list"
     fi
   else
-    local status age
+    local status
     status="$(jq -r '.trust_list.status // "none"' "$health")"
-    age="$(jq -r '.trust_list.age_seconds // ""' "$health")"
     case "$status" in
       missing)
         error "The runner has no verified approved-releases list (trust_list.status missing); hosted inference fails with release_not_approved"
         ;;
-      current | stale)
-        if ! [[ "$age" =~ ^[0-9]+$ ]]; then
-          error "trust_list.age_seconds is missing or not a whole number"
-        elif [ "$age" -ge "$MAX_AGE_SECONDS" ]; then
-          error "The runner's approved-releases list is $(days "$age") old (trust_list.status $status); publish a new version (fails past 7 days)"
-        elif [ "$status" = "stale" ]; then
-          warn "The runner reports its approved-releases list stale at $(days "$age")"
-        elif [ "$age" -ge "$WARN_AGE_SECONDS" ]; then
-          warn "The runner's approved-releases list is $(days "$age") old; this check fails at 7 days"
-        fi
-        ;;
+      current | stale) ;;
       *) error "Unknown trust_list.status: $status" ;;
     esac
   fi

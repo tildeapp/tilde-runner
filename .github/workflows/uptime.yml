@@ -34,16 +34,16 @@
 # Assertions, in order:
 #   1. https://tildeapp.ai/approved-releases.json verifies under the compiled approval key (or a
 #      successor it endorsed); router.repo is tinfoilsh/confidential-model-router; its version is
-#      not below the last verified version or APPROVED_LIST_MIN_VERSION; issued_at is under 7 days
-#      old (a warning from 6 days) and not in the future. https://tildeapp.ai/approved-releases.v2.json,
+#      not below the last verified version or APPROVED_LIST_MIN_VERSION. Its age is not checked: an
+#      unchanged list needs no re-signing. https://tildeapp.ai/approved-releases.v2.json,
 #      the same list in format v2 with each release's minimum app version, which newer app builds read,
 #      verifies and matches it once the minimums are set aside.
 #   2. The runner's attested release digest (any release of tildeapp/tilde-runner) is in the list's
 #      `approved` and not in `revoked`. Every request below is pinned to that tag and digest.
 #   3. /health: service tilde-runner, `state` ready, `enrolled` true (R1 only: a hosted runner has no
 #      one enrollment), `store` volume, no
-#      `volume_error` (custody check 24); `trust_list.status` current, or stale under 7 days (a
-#      warning); `missing`, an absent `trust_list` or `age_seconds` of 7 days or more fail.
+#      `volume_error` (custody check 24); `trust_list.status` current or stale (its age is not
+#      checked); `missing` or an absent `trust_list` fail.
 #      When `families` is present (R2, `tilde-runner hosted`): `families.unreadable`,
 #      `families.refused` and `families.breaker_open` are 0 and `host` is registered. `state` is the
 #      host's own (runner/rust/src/supervisor/front.rs), so a family's refusal shows only in

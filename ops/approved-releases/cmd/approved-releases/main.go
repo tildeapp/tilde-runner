@@ -7,7 +7,8 @@
 //	approved-releases verify -pub BASE64 -in LIST.json  # either format; prints the verified document
 //
 // DOC.json is a v2 document: every approved release carries minimum_app, the oldest app build it
-// serves ({"ios": [major, minor, build], "android": versionCode}). sign writes the same document as
+// serves ({"ios": [major, minor, build], "android": versionCode}, and optionally "macos": [major,
+// minor, build]). sign writes the same document as
 // both lists from one key: v2 as given, and v1 without the minimums for app builds that read only
 // v1 (and for the runner's mirror). Both lists share the version, which must exceed each -previous.
 //
@@ -23,6 +24,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 
 	"com.tilde/runner-client/internal/approval"
@@ -113,7 +115,26 @@ func published(path string, scheme approval.Scheme) (approval.Document, error) {
 	return document, err
 }
 
-// lowered names an approved release whose minimum the new document lowers on some platform.
+// signsInFull refuses a document the signer would not sign as given. The reader skips a platform in
+// minimum_app it does not know, so a key this build cannot write (a later platform, or a misspelt
+// one) would otherwise vanish from the signed list without a word.
+func signsInFull(raw []byte, document approval.Document) error {
+	encoded, err := json.Marshal(document)
+	if err != nil {
+		return err
+	}
+	var given, signed any
+	if json.Unmarshal(raw, &given) != nil || json.Unmarshal(encoded, &signed) != nil {
+		return approval.ErrMalformed
+	}
+	if !reflect.DeepEqual(given, signed) {
+		return errors.New("document holds a key this signer would drop, such as a platform in minimum_app it does not know; sign with a signer that writes it")
+	}
+	return nil
+}
+
+// lowered names an approved release whose minimum the new document lowers on some platform. Dropping
+// a release's macOS minimum lowers it.
 func lowered(previous, next approval.Document) (string, bool) {
 	before := map[string]approval.AppMinimum{}
 	for _, release := range previous.Approved {
@@ -127,7 +148,7 @@ func lowered(previous, next approval.Document) (string, bool) {
 			continue
 		}
 		now := *release.MinimumApp
-		if now.Android < earlier.Android || compareIOS(now.IOS, earlier.IOS) < 0 {
+		if now.Android < earlier.Android || compareIOS(now.IOS, earlier.IOS) < 0 || compareIOS(now.MacOS, earlier.MacOS) < 0 {
 			return release.Tag, true
 		}
 	}
@@ -175,6 +196,9 @@ func sign(args []string) error {
 	document, _, err := approval.V2.ParseDocument(raw)
 	if err != nil {
 		return fmt.Errorf("document (a v2 document: every approved release needs minimum_app): %w", err)
+	}
+	if err := signsInFull(raw, document); err != nil {
+		return err
 	}
 	for path, scheme := range map[string]approval.Scheme{*previous: approval.V1, *previousV2: approval.V2} {
 		if path == "" {

@@ -28,6 +28,12 @@
 //
 //	"approved": [{"tag": …, "digest": 64 hex, "minimum_app": {"ios": [major, minor, build], "android": versionCode}}]
 //
+// minimum_app may also carry "macos": [major, minor, build], the Mac app's minimum in the iOS
+// shape. It is optional, and a platform key this reader does not know is skipped whatever its value,
+// so a later platform can be added without breaking the readers already installed. A known
+// platform's value must still be well formed. Readers ship before any list names a new platform
+// (runner/keyserver/README.md, Format v2).
+//
 // It has its own format string and signing context ("tilde.approved-releases.v2\n"), so a v1
 // signature never verifies as v2 or the other way round, and an introduction must be in the same
 // format as the list that carries it. Apps that verify v1 refuse any field they do not know, so the
@@ -129,11 +135,13 @@ func SchemeOf(format string) (Scheme, bool) {
 // AppMinimum is the oldest app build an approved release serves. iOS is [major, minor, build]:
 // CFBundleShortVersionString "major.minor" and CFBundleVersion, compared part by part, because the
 // release manifest restarts the build number at 0 on every major or minor bump. Android is the
-// versionCode, which only ever increases. An app is too old only when strictly below its platform's
-// minimum.
+// versionCode, which only ever increases. MacOS has the iOS shape, and is the zero value when the
+// list names no Mac minimum (a major version is never 0). An app is too old only when strictly below
+// its platform's minimum.
 type AppMinimum struct {
 	IOS     [3]uint32 `json:"ios"`
 	Android uint32    `json:"android"`
+	MacOS   [3]uint32 `json:"macos,omitzero"`
 }
 
 type Release struct {
@@ -383,31 +391,49 @@ func (s Scheme) parseRelease(raw json.RawMessage) (Release, bool) {
 	return Release{Tag: *release.Tag, Digest: *release.Digest, MinimumApp: &minimum}, true
 }
 
-// parseMinimum reads {"ios": [major, minor, build], "android": versionCode}. Each value must be a
-// plain integer literal in range: iOS major from 1, minor and build from 0, each at most
-// MaxIOSVersionPart; Android from 1 to MaxVersionCode. A missing platform, an extra key, null, a
-// string, a fraction, an exponent, a sign or the wrong number of iOS parts is malformed; nothing
-// falls back to zero.
+// parseMinimum reads {"ios": [major, minor, build], "android": versionCode} and an optional
+// "macos": [major, minor, build]. Each value must be a plain integer literal in range: iOS and macOS
+// major from 1, minor and build from 0, each at most MaxIOSVersionPart; Android from 1 to
+// MaxVersionCode. A missing ios or android, null, a string, a fraction, an exponent, a sign or the
+// wrong number of parts is malformed, for macos as for ios: a known platform's minimum is never
+// skipped, guessed or defaulted, so a defective one cannot silently lift that platform's gate. Any
+// other key names a platform this reader does not know and is skipped, whatever its value.
 func parseMinimum(raw json.RawMessage) (AppMinimum, bool) {
-	var platforms struct {
-		IOS     *json.RawMessage `json:"ios"`
-		Android *json.RawMessage `json:"android"`
-	}
-	if strictDecode(raw, &platforms) != nil || platforms.IOS == nil || platforms.Android == nil {
+	var platforms map[string]json.RawMessage
+	if strictDecode(raw, &platforms) != nil || platforms == nil {
 		return AppMinimum{}, false
 	}
+	iosRaw, hasIOS := platforms["ios"]
+	androidRaw, hasAndroid := platforms["android"]
+	if !hasIOS || !hasAndroid {
+		return AppMinimum{}, false
+	}
+	ios, iosOK := appleVersion(iosRaw)
+	android, androidOK := integer(androidRaw, 1, MaxVersionCode)
+	if !iosOK || !androidOK {
+		return AppMinimum{}, false
+	}
+	minimum := AppMinimum{IOS: ios, Android: android}
+	if macRaw, hasMac := platforms["macos"]; hasMac {
+		mac, ok := appleVersion(macRaw)
+		if !ok {
+			return AppMinimum{}, false
+		}
+		minimum.MacOS = mac
+	}
+	return minimum, true
+}
+
+// appleVersion reads [major, minor, build]: major from 1, minor and build from 0.
+func appleVersion(raw json.RawMessage) ([3]uint32, bool) {
 	var parts []json.RawMessage
-	if strictDecode(*platforms.IOS, &parts) != nil || len(parts) != 3 {
-		return AppMinimum{}, false
+	if strictDecode(raw, &parts) != nil || len(parts) != 3 {
+		return [3]uint32{}, false
 	}
 	major, majorOK := integer(parts[0], 1, MaxIOSVersionPart)
 	minor, minorOK := integer(parts[1], 0, MaxIOSVersionPart)
 	build, buildOK := integer(parts[2], 0, MaxIOSVersionPart)
-	android, androidOK := integer(*platforms.Android, 1, MaxVersionCode)
-	if !majorOK || !minorOK || !buildOK || !androidOK {
-		return AppMinimum{}, false
-	}
-	return AppMinimum{IOS: [3]uint32{major, minor, build}, Android: android}, true
+	return [3]uint32{major, minor, build}, majorOK && minorOK && buildOK
 }
 
 func integer(raw json.RawMessage, least, most uint64) (uint32, bool) {
